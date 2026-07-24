@@ -534,7 +534,9 @@ class ResponseStore:
         ):
             try:
                 if candidate.exists():
-                    candidate.chmod(0o600)
+                    from hermes_constants import apply_shared_hermes_mode
+                    if not apply_shared_hermes_mode(candidate):
+                        candidate.chmod(0o600)
             except OSError:
                 logger.debug(
                     "Failed to restrict response store permissions for %s",

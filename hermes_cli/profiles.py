@@ -33,6 +33,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import List, Optional, Tuple
 
 from agent.skill_utils import is_excluded_skill_path
+from hermes_constants import apply_shared_hermes_mode
 
 _PROFILE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
@@ -1084,7 +1085,7 @@ def create_profile(
                     # preserves source mode bits, but if the source's .env
                     # was loose (host umask 0o022 leaving 0o644), tighten
                     # explicitly so the clone doesn't inherit weak perms.
-                    if filename == ".env":
+                    if filename == ".env" and not apply_shared_hermes_mode(dst):
                         try:
                             os.chmod(str(dst), 0o600)
                         except OSError:
@@ -1121,7 +1122,8 @@ def create_profile(
                 "# Behavioral settings belong in config.yaml, not here.\n",
                 encoding="utf-8",
             )
-            os.chmod(str(env_path), 0o600)
+            if not apply_shared_hermes_mode(env_path):
+                os.chmod(str(env_path), 0o600)
         except OSError:
             pass  # best-effort — save_env_value creates the file on demand
 
@@ -1268,7 +1270,8 @@ def backfill_profile_envs(quiet: bool = False) -> List[str]:
                     "# Behavioral settings belong in config.yaml, not here.\n",
                     encoding="utf-8",
                 )
-            os.chmod(str(env_path), 0o600)
+            if not apply_shared_hermes_mode(env_path):
+                os.chmod(str(env_path), 0o600)
             backfilled.append(entry.name)
         except OSError as e:
             if not quiet:

@@ -52,7 +52,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
-from hermes_constants import secure_parent_dir
+from hermes_constants import apply_shared_hermes_mode, secure_parent_dir
+from utils import atomic_replace
 
 logger = logging.getLogger(__name__)
 
@@ -337,17 +338,20 @@ def _read_json(path: Path) -> dict | None:
 
 
 def _write_json(path: Path, data: dict) -> None:
-    """Write a dict as JSON with restricted permissions (0o600).
+    """Write JSON without a world-readable creation window.
 
     Uses ``os.open`` with ``O_EXCL`` and an explicit mode so the file is
-    created atomically at 0o600. The previous ``write_text`` + post-write
-    ``chmod`` opened a TOCTOU window where the temp file briefly inherited
-    the process umask (commonly 0o644 = world-readable), exposing OAuth
-    tokens to other local users between create and chmod. Mirrors the fix
-    in ``agent/google_oauth.py`` (#19673).
+    created atomically at 0o600. It remains 0o600 normally and is normalized
+    to 0o660 only when shared-home mode explicitly makes the trusted Hermes
+    group the boundary for all state. The previous ``write_text`` + post-write
+    ``chmod`` opened a TOCTOU window where the temp file briefly inherited the
+    process umask (commonly 0o644 = world-readable), exposing OAuth tokens to
+    other local users between create and chmod. Mirrors the fix in
+    ``agent/google_oauth.py`` (#19673).
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    # Tighten parent dir to 0o700 so siblings can't traverse to the creds.
+    # Tighten the parent to 0o700 normally; shared mode normalizes it to the
+    # trusted-group directory policy.
     # No-op on Windows (POSIX mode bits aren't enforced); ignore failures.
     # secure_parent_dir refuses to chmod / or top-level dirs (#25821).
     secure_parent_dir(path)
@@ -364,7 +368,7 @@ def _write_json(path: Path, data: dict) -> None:
             json.dump(data, fh, indent=2, default=str)
             fh.flush()
             os.fsync(fh.fileno())
-        os.replace(tmp, path)
+        atomic_replace(tmp, path)
     except OSError:
         try:
             tmp.unlink(missing_ok=True)
@@ -548,6 +552,7 @@ class HermesTokenStorage:
                 )
                 with os.fdopen(fd, "wb") as fh:
                     fh.write(data)
+                apply_shared_hermes_mode(path)
             except OSError as exc:
                 logger.warning("Failed to restore OAuth state %s: %s", fname, exc)
 

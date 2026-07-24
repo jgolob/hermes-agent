@@ -51,6 +51,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from hermes_constants import get_hermes_home
+from utils import atomic_replace
 
 logger = logging.getLogger(__name__)
 
@@ -145,7 +146,7 @@ def stage_write(subsystem: str, payload: Dict[str, Any],
         path = d / f"{pid}.json"
         tmp = path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(tmp, path)
+        atomic_replace(tmp, path)
     except Exception as e:  # pragma: no cover - disk failure path
         logger.error("Failed to stage pending %s write: %s", subsystem, e, exc_info=True)
     return record

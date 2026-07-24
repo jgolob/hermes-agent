@@ -114,6 +114,11 @@ If you want to clone the repo and install from source — for contributing, runn
 
 Running Hermes as a dedicated unprivileged user (e.g. a `hermes` systemd service account, or any user without `sudo` access) is supported. The only thing on the install path that genuinely needs root is Playwright's `--with-deps` step, which `apt`-installs shared libraries (`libnss3`, `libxkbcommon`, etc.) used by Chromium. The installer detects whether sudo is available and gracefully degrades when it isn't — it will install the Chromium binary into the service user's own Playwright cache and print the exact command an administrator needs to run separately.
 
+If a human operator must review and manage state created by that service
+account, use the [Shared, Auditable Hermes Home](../user-guide/shared-hermes-home.md)
+setup. It uses a dedicated `hermes` group and does not require sharing the
+service UID with the operator.
+
 **Recommended split (Debian/Ubuntu):**
 
 1. **One time, as an admin user with sudo**, install the system libraries Chromium needs:

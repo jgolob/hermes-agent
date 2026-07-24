@@ -13,6 +13,8 @@ from urllib.parse import urlparse
 
 import yaml
 
+from hermes_constants import apply_shared_hermes_mode
+
 logger = logging.getLogger(__name__)
 
 
@@ -105,8 +107,11 @@ def atomic_replace(tmp_path: Union[str, Path], target: Union[str, Path]) -> str:
     those cases fall back to copy/fsync/unlink for cross-device, bind-mount,
     and busy-file deployments.
 
-    Returns the resolved real path used for the replace, so callers that
-    need to re-apply permissions can target it instead of the symlink.
+    Shared-home mode is normalized after the replacement. This intentionally
+    includes credential files: when explicitly enabled, the trusted Hermes
+    group is the permission boundary for all state below HERMES_HOME. Returns
+    the resolved real path so callers that restore owner/mode metadata can
+    target it and then re-apply the shared policy if needed.
     """
     target_str = str(target)
     real_path = os.path.realpath(target_str) if os.path.islink(target_str) else target_str
@@ -133,6 +138,7 @@ def atomic_replace(tmp_path: Union[str, Path], target: Union[str, Path]) -> str:
         except OSError:
             pass
         os.unlink(tmp_str)
+    apply_shared_hermes_mode(real_path)
     return real_path
 
 
@@ -198,6 +204,7 @@ def atomic_json_write(
                 pass
         else:
             _restore_file_mode(real_path_obj, original_mode)
+        apply_shared_hermes_mode(real_path_obj)
     except BaseException:
         # Intentionally catch BaseException so temp-file cleanup still runs for
         # KeyboardInterrupt/SystemExit before re-raising the original signal.
@@ -324,6 +331,7 @@ def atomic_yaml_write(
         real_path_obj = Path(real_path)
         _restore_file_owner(real_path_obj, original_owner)
         _restore_file_mode(real_path_obj, original_mode)
+        apply_shared_hermes_mode(real_path_obj)
     except BaseException:
         # Match atomic_json_write: cleanup must also happen for process-level
         # interruptions before we re-raise them.
@@ -393,6 +401,7 @@ def atomic_roundtrip_yaml_update(
         real_path_obj = Path(real_path)
         _restore_file_owner(real_path_obj, original_owner)
         _restore_file_mode(real_path_obj, original_mode)
+        apply_shared_hermes_mode(real_path_obj)
     except BaseException:
         try:
             os.unlink(tmp_path)

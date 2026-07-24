@@ -19,7 +19,7 @@ import time
 from pathlib import Path
 from typing import Dict
 
-from hermes_constants import display_hermes_home
+from hermes_constants import apply_shared_hermes_mode, display_hermes_home
 from utils import atomic_replace
 from hermes_cli.config import cfg_get
 
@@ -67,11 +67,13 @@ def _save_subscriptions(subs: Dict[str, dict]) -> None:
             json.dump(subs, fh, indent=2, ensure_ascii=False)
             fh.flush()
             os.fsync(fh.fileno())
-        os.chmod(tmp_path, _SUBSCRIPTIONS_FILE_MODE)
+        if not apply_shared_hermes_mode(tmp_path):
+            os.chmod(tmp_path, _SUBSCRIPTIONS_FILE_MODE)
         atomic_replace(tmp_path, path)
         # Re-assert after rename in case the destination existed with a
         # broader mode and atomic_replace preserved it.
-        os.chmod(path, _SUBSCRIPTIONS_FILE_MODE)
+        if not apply_shared_hermes_mode(path):
+            os.chmod(path, _SUBSCRIPTIONS_FILE_MODE)
     except Exception:
         try:
             tmp_path.unlink(missing_ok=True)

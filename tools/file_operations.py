@@ -40,6 +40,7 @@ from agent.file_safety import (
     get_write_denied_error,
     is_write_denied as _shared_is_write_denied,
 )
+from hermes_constants import apply_shared_hermes_mode, shared_hermes_dir_mode
 
 
 # ---------------------------------------------------------------------------
@@ -864,6 +865,46 @@ class ShellFileOperations(FileOperations):
             stdout=result.get("output", ""),
             exit_code=result.get("returncode", 0)
         )
+
+    def _apply_local_shared_mode(self, path: str) -> None:
+        """Normalize a local Hermes-home write after an atomic replacement.
+
+        Also walks the parent chain, because ``write_file`` seeds missing
+        directories with ``mkdir -p`` — those land at the process umask, so a
+        nested agent write (``skills/foo/bar/SKILL.md``) would otherwise leave
+        owner-only directories that make the file below them unreachable to the
+        reviewing group even though the file itself is 0660.
+
+        The walk stops at the first path outside the Hermes home:
+        ``apply_shared_hermes_mode`` returns ``False`` for anything it does not
+        own, which is also what stops us at the home root's parent.
+        """
+        from tools.environments.local import LocalEnvironment
+
+        if not isinstance(self.env, LocalEnvironment):
+            return
+        target = Path(path)
+        if not target.is_absolute():
+            target = Path(getattr(self.env, "cwd", None) or self.cwd) / target
+        executable = False
+        try:
+            executable = bool(target.stat().st_mode & 0o111)
+        except OSError:
+            pass
+        apply_shared_hermes_mode(target, executable=executable)
+
+        parent = target.parent
+        while True:
+            try:
+                if (parent.stat().st_mode & 0o7777) == shared_hermes_dir_mode():
+                    break
+            except OSError:
+                pass
+            if not apply_shared_hermes_mode(parent, directory=True):
+                break
+            if parent == parent.parent:
+                break
+            parent = parent.parent
     
     def _has_command(self, cmd: str) -> bool:
         """Check if a command exists in the environment (cached)."""
@@ -1514,6 +1555,7 @@ class ShellFileOperations(FileOperations):
 
         if write_result.exit_code != 0:
             return WriteResult(error=f"Failed to write file: {write_result.stdout}")
+        self._apply_local_shared_mode(path)
 
         # Get bytes written (wc -c is POSIX, works on Linux + macOS)
         stat_cmd = f"wc -c < {self._escape_shell_arg(path)} 2>/dev/null"

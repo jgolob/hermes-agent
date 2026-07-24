@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from hermes_constants import get_default_hermes_root, get_hermes_home, display_hermes_home
+from hermes_constants import apply_shared_hermes_mode, get_default_hermes_root, get_hermes_home, display_hermes_home
 
 logger = logging.getLogger(__name__)
 
@@ -611,10 +611,11 @@ def run_import(args) -> None:
                         dst.write(src.read())
                     # External provider configs commonly hold credentials.
                     if target.suffix in {".json", ".env", ".conf"} or target.name in _SECRET_FILE_NAMES:
-                        try:
-                            os.chmod(target, 0o600)
-                        except OSError:
-                            pass
+                        if not apply_shared_hermes_mode(target):
+                            try:
+                                os.chmod(target, 0o600)
+                            except OSError:
+                                pass
                     restored += 1
                     restored_external += 1
                 except (PermissionError, OSError) as exc:
@@ -655,7 +656,7 @@ def run_import(args) -> None:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with zf.open(member) as src, open(target, "wb") as dst:
                     dst.write(src.read())
-                if target.name in _SECRET_FILE_NAMES:
+                if target.name in _SECRET_FILE_NAMES and not apply_shared_hermes_mode(target):
                     os.chmod(target, 0o600)
                 restored += 1
             except (PermissionError, OSError) as exc:

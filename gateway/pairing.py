@@ -33,7 +33,7 @@ from gateway.whatsapp_identity import (
     expand_whatsapp_aliases,
     normalize_whatsapp_identifier,
 )
-from hermes_constants import get_hermes_dir, get_hermes_home
+from hermes_constants import apply_shared_hermes_mode, get_hermes_dir, get_hermes_home
 from utils import atomic_replace
 
 logger = logging.getLogger(__name__)
@@ -220,10 +220,11 @@ def _secure_write(path: Path, data: str) -> None:
             f.flush()
             os.fsync(f.fileno())
         atomic_replace(tmp_path, path)
-        try:
-            os.chmod(path, 0o600)
-        except OSError:
-            pass  # Windows doesn't support chmod the same way
+        if not apply_shared_hermes_mode(path):
+            try:
+                os.chmod(path, 0o600)
+            except OSError:
+                pass  # Windows doesn't support chmod the same way
     except BaseException:
         try:
             os.unlink(tmp_path)

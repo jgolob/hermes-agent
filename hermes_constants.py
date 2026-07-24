@@ -150,6 +150,75 @@ def get_process_hermes_home() -> Path:
     return _hermes_home_from_env()
 
 
+def is_shared_hermes_home() -> bool:
+    """Return whether Hermes should maintain group-reviewable state.
+
+    ``HERMES_SHARED_HOME`` is an operator-facing POSIX deployment setting for
+    a dedicated Hermes account and a deliberately managed shared group.  It
+    is intentionally a no-op on native Windows, whose ACL model has no
+    equivalent for setgid directories and POSIX group modes.
+
+    Both Linux and macOS are supported. Linux uses setgid ``2770`` directories;
+    macOS silently strips setgid from directories but already inherits the
+    parent directory's group, so its equivalent mode is ``0770``.
+    """
+    if os.name != "posix":
+        return False
+    return os.environ.get("HERMES_SHARED_HOME", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def shared_hermes_dir_mode() -> int:
+    """Return the desired directory mode for a shared Hermes home."""
+    return 0o770 if sys.platform == "darwin" else 0o2770
+
+
+def shared_hermes_file_mode(*, executable: bool = False) -> int:
+    """Return the desired regular-file mode for a shared Hermes home."""
+    return 0o770 if executable else 0o660
+
+
+def apply_shared_hermes_mode(
+    path: str | Path,
+    *,
+    directory: bool = False,
+    executable: bool = False,
+) -> bool:
+    """Apply shared-home permissions to a path below ``HERMES_HOME``.
+
+    Returns ``True`` only when shared mode is active and the target belongs to
+    the current Hermes home.  Keeping this boundary check here prevents an
+    ambient environment variable from broadening permissions on unrelated
+    operator paths.
+
+    The boundary deliberately covers the default root and every profile below
+    it: a shared-home operator is trusted to review the whole Hermes deployment,
+    not only whichever profile is currently active.
+
+    Callers writing an executable must pass ``executable=True`` explicitly.
+    Atomic temp files do not retain the replaced file's execute bits, so
+    guessing from the post-replace target would be unreliable.
+    """
+    if not is_shared_hermes_home():
+        return False
+    try:
+        target = Path(path).resolve()
+        target.relative_to(get_default_hermes_root().resolve())
+    except (OSError, RuntimeError, ValueError):
+        return False
+    try:
+        os.chmod(
+            target,
+            shared_hermes_dir_mode()
+            if directory
+            else shared_hermes_file_mode(executable=executable),
+        )
+    except OSError:
+        return False
+    return True
+
+
 def get_default_hermes_root() -> Path:
     """Return the root Hermes directory for profile-level operations.
 
@@ -662,7 +731,7 @@ def display_hermes_home() -> str:
 
 
 def secure_parent_dir(path: Path) -> None:
-    """Chmod ``0o700`` on the parent directory of *path*, but only if safe.
+    """Secure the parent directory of *path*, but only if safe.
 
     Refuses to chmod ``/`` or any top-level directory (resolved parent with
     fewer than 3 parts, i.e. ``/`` or any direct child like ``/usr``) to
@@ -674,6 +743,8 @@ def secure_parent_dir(path: Path) -> None:
     parent = path.parent.resolve()
     # Refuse root and its direct children (/usr, /home, /var, /tmp, …).
     if parent == Path("/") or len(parent.parts) < 3:
+        return
+    if apply_shared_hermes_mode(parent, directory=True):
         return
     try:
         os.chmod(parent, 0o700)

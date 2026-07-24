@@ -19,6 +19,10 @@
 # Drop to hermes via s6-setuidgid, but skip it when already non-root.
 set -e
 
+case "${HERMES_SHARED_HOME:-}" in
+    1|true|TRUE|True|yes|YES|Yes|on|ON|On) umask 0007 ;;
+esac
+
 drop() { [ "$(id -u)" = 0 ] && set -- s6-setuidgid hermes "$@"; exec "$@"; }
 
 # --- Reject the unsupported `docker run --user <uid>:<gid>` start ---

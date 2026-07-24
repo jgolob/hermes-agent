@@ -249,10 +249,12 @@ def save_weixin_account(
     }
     path = _account_file(hermes_home, account_id)
     atomic_json_write(path, payload)
-    try:
-        path.chmod(0o600)
-    except OSError:
-        pass
+    from hermes_constants import apply_shared_hermes_mode
+    if not apply_shared_hermes_mode(path):
+        try:
+            path.chmod(0o600)
+        except OSError:
+            pass
 
 
 def load_weixin_account(hermes_home: str, account_id: str) -> Optional[Dict[str, Any]]:

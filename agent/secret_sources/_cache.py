@@ -47,6 +47,7 @@ from agent.secret_sources.base import (  # noqa: E402
     FetchResult,
     is_valid_env_name,
 )
+from hermes_constants import apply_shared_hermes_mode
 
 
 # ---------------------------------------------------------------------------
@@ -177,10 +178,11 @@ class DiskCache(Generic[K]):
             cache_dir.mkdir(parents=True, exist_ok=True)
             # mkdir's mode is umask-subject; chmod the dir to 0700 so cache
             # metadata isn't exposed if HERMES_HOME is ever made traversable.
-            try:
-                os.chmod(cache_dir, 0o700)
-            except OSError:
-                pass
+            if not apply_shared_hermes_mode(cache_dir, directory=True):
+                try:
+                    os.chmod(cache_dir, 0o700)
+                except OSError:
+                    pass
             payload = {
                 "key": self._key_serializer(key),
                 "secrets": entry.secrets,
@@ -194,8 +196,10 @@ class DiskCache(Generic[K]):
             try:
                 with os.fdopen(fd, "w", encoding="utf-8") as f:
                     json.dump(payload, f)
-                os.chmod(tmp, 0o600)
+                if not apply_shared_hermes_mode(tmp):
+                    os.chmod(tmp, 0o600)
                 os.replace(tmp, path)
+                apply_shared_hermes_mode(path)
             except BaseException:
                 try:
                     os.unlink(tmp)

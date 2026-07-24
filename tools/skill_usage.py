@@ -35,6 +35,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from hermes_constants import get_hermes_home
 from agent.skill_utils import is_excluded_skill_path, is_external_skill_path
+from utils import atomic_replace
 
 logger = logging.getLogger(__name__)
 
@@ -296,7 +297,7 @@ def _write_suppressed_names(names: Set[str]) -> None:
                 f.write(data)
                 f.flush()
                 os.fsync(f.fileno())
-            os.replace(tmp, path)
+            atomic_replace(tmp, path)
         except BaseException:
             try:
                 os.unlink(tmp)
@@ -530,7 +531,7 @@ def save_usage(data: Dict[str, Dict[str, Any]]) -> None:
                 json.dump(data, f, indent=2, sort_keys=True, ensure_ascii=False)
                 f.flush()
                 os.fsync(f.fileno())
-            os.replace(tmp_path, path)
+            atomic_replace(tmp_path, path)
         except BaseException:
             try:
                 os.unlink(tmp_path)

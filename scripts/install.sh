@@ -46,6 +46,21 @@ BOLD='\033[1m'
 REPO_URL_SSH="git@github.com:NousResearch/hermes-agent.git"
 REPO_URL_HTTPS="https://github.com/NousResearch/hermes-agent.git"
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
+case "${HERMES_SHARED_HOME:-}" in
+    1|true|TRUE|True|yes|YES|Yes|on|ON|On) HERMES_SHARED_HOME_ENABLED=true ;;
+    *) HERMES_SHARED_HOME_ENABLED=false ;;
+esac
+# Shared mode deliberately relaxes permissions on $HERMES_HOME *only*.  The
+# group-writable umask is applied inside copy_config_templates rather than at
+# script scope, because a process-global 0007 would also land on $INSTALL_DIR,
+# the venv, and $HERMES_HOME/node — handing every member of the shared group
+# write access to the code the hermes account executes.  That inverts the audit
+# boundary shared mode exists to create; the install tree stays owner-only.
+#
+# Canonical list of Hermes-home subdirectories that shared mode manages.  The
+# seeding mkdir and the permission sweep both derive from this so they cannot
+# drift apart.  Kept in sync with the seed list in docker/stage2-hook.sh.
+HERMES_SHARED_SUBDIRS="cron sessions logs pairing platforms/pairing hooks image_cache audio_cache memories skills profiles"
 # INSTALL_DIR is resolved AFTER arg parsing and OS detection so we can pick an
 # FHS-style layout for root installs.  Track whether the user gave us an
 # explicit directory — if so we never override it.
@@ -1780,8 +1795,20 @@ EOF
 copy_config_templates() {
     log_info "Setting up configuration files..."
 
-    # Create ~/.hermes directory structure (config at top level, code in subdir)
-    mkdir -p "$HERMES_HOME"/{cron,sessions,logs,pairing,hooks,image_cache,audio_cache,memories,skills}
+    # Relax the umask for the duration of this function only — everything it
+    # touches lives under $HERMES_HOME.  Restored before returning so the rest
+    # of the install (venv, node, $INSTALL_DIR) keeps owner-only modes.
+    local _saved_umask=""
+    if [ "$HERMES_SHARED_HOME_ENABLED" = true ]; then
+        _saved_umask="$(umask)"
+        umask 0007
+    fi
+
+    # Create the managed Hermes state directories from the canonical list.
+    mkdir -p "$HERMES_HOME"
+    for _sub in $HERMES_SHARED_SUBDIRS; do
+        mkdir -p "$HERMES_HOME/$_sub"
+    done
 
     # Create .env at ~/.hermes/.env (top level, easy to find)
     if [ ! -f "$HERMES_HOME/.env" ]; then
@@ -1795,10 +1822,15 @@ copy_config_templates() {
     else
         log_info "~/.hermes/.env already exists, keeping it"
     fi
-    # Restrict .env permissions — this file holds API keys and tokens.
-    # 0600 ensures only the file owner can read/write, matching standard
-    # practice for credential files (.netrc, .aws/credentials, .ssh/config).
-    chmod 600 "$HERMES_HOME/.env"
+    # Shared mode deliberately exposes credentials to the trusted Hermes
+    # group; ordinary installs retain owner-only access.
+    if [ "$HERMES_SHARED_HOME_ENABLED" = true ]; then
+        chmod 660 "$HERMES_HOME/.env"
+        log_warn "HERMES_SHARED_HOME is set: $HERMES_HOME/.env is group-readable (0660)."
+        log_warn "  Every member of the owning group can read your API keys and tokens."
+    else
+        chmod 600 "$HERMES_HOME/.env"
+    fi
     configure_browser_env_from_system_browser
 
     # Create config.yaml at ~/.hermes/config.yaml (top level, easy to find)
@@ -1848,6 +1880,43 @@ SOUL_EOF
             fi
         fi
     fi
+
+    if [ "$HERMES_SHARED_HOME_ENABLED" = true ]; then
+        apply_shared_home_permissions
+    fi
+    [ -z "$_saved_umask" ] || umask "$_saved_umask"
+}
+
+# Bring $HERMES_HOME up to the shared-home policy: setgid 2770 directories and
+# group-readable/writable files, so a trusted operator group can audit agent
+# state without impersonating the Hermes account.  Idempotent — safe to re-run
+# on an existing home, which is what converts a previously owner-only install.
+apply_shared_home_permissions() {
+    case "$(uname -s 2>/dev/null || true)" in
+        Darwin) _shared_dir_mode=0770 ;;
+        *) _shared_dir_mode=2770 ;;
+    esac
+    _prior_mode="$(
+        stat -c %a "$HERMES_HOME" 2>/dev/null ||
+        stat -f %Lp "$HERMES_HOME" 2>/dev/null ||
+        true
+    )"
+    set -- # collect the subdirs that actually exist
+    for _sub in $HERMES_SHARED_SUBDIRS; do
+        [ ! -d "$HERMES_HOME/$_sub" ] || set -- "$@" "$HERMES_HOME/$_sub"
+    done
+
+    chmod "$_shared_dir_mode" "$HERMES_HOME"
+    if [ "$#" -gt 0 ] && [ "$_prior_mode" != "${_shared_dir_mode#0}" ]; then
+        find "$@" -type d -exec chmod "$_shared_dir_mode" {} +
+        # g+rwX only adds the execute bit where it already applies (dirs, and
+        # files that were already executable), so scripts keep their mode and
+        # ordinary data files do not become executable.
+        find "$@" -type f -exec chmod g+rwX,o-rwx {} +
+    fi
+    for _file in .env config.yaml SOUL.md .no-bundled-skills; do
+        [ ! -e "$HERMES_HOME/$_file" ] || chmod 660 "$HERMES_HOME/$_file"
+    done
 }
 
 find_system_browser() {

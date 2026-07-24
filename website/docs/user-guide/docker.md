@@ -782,21 +782,29 @@ Check logs: `docker logs hermes`. Common causes:
 
 ### "Permission denied" errors
 
-The container's stage2 hook drops privileges to the non-root `hermes` user (UID 10000) via `s6-setuidgid` inside each supervised service. If your host `~/.hermes/` is owned by a different UID, set `HERMES_UID`/`HERMES_GID` — or their `PUID`/`PGID` aliases, for parity with LinuxServer.io and NAS images — to match your host user, or ensure the data directory is writable:
+For a shared, reviewable data volume used by a dedicated Hermes account and
+trusted human operators or sibling containers, use the supported
+[Shared, Auditable Hermes Home](./shared-hermes-home.md) setup. It aligns a
+dedicated `hermes` **group** across the host and containers; do not work around
+shared-volume access by mapping the container to your personal host UID/GID.
 
-```sh
-chmod -R 755 ~/.hermes
-```
+The container's stage2 hook drops privileges to the non-root `hermes` user via
+`s6-setuidgid`. In shared-home mode, a different host owner UID is expected:
+access comes from the deliberately aligned `hermes` GID and `2770`/`0660`
+permissions.
 
-On a NAS (UGOS, Synology, unRAID) the data directory is typically a **bind mount** owned by a host UID the container cannot `chown`. Set `PUID`/`PGID` (or `HERMES_UID`/`HERMES_GID`) to that host user so the runtime runs as the owner of the mount rather than UID 10000:
+Do not add world access with `chmod -R 755`, and do not set `HERMES_UID`,
+`PUID`, or `PGID` to your personal host identity for this model.
 
-```sh
-docker run -d \
-  --name hermes \
-  -e PUID=1000 -e PGID=10 \
-  -v /volume1/docker/hermes:/opt/data \
-  nousresearch/hermes-agent gateway run
-```
+### Legacy single-owner NAS volumes
+
+`PUID`/`PGID` and the paired owner-remapping use of
+`HERMES_UID`/`HERMES_GID` remain compatibility options for single-owner NAS
+volumes that cannot provide a dedicated shared group. That is a different
+deployment model: it makes Hermes impersonate the volume owner and does not
+provide the auditable service-account boundary described above. Do not use it
+as a substitute for shared-home mode. Setting `HERMES_GID` alone is still the
+correct shared-home configuration.
 
 `docker exec hermes <cmd>` automatically drops to UID 10000 too — see [`docker exec` automatically drops to the `hermes` user](#docker-exec-automatically-drops-to-the-hermes-user) for details and the per-invocation opt-out.
 

@@ -678,7 +678,12 @@ def get_container_exec_info() -> Optional[dict]:
 # =============================================================================
 
 # Re-export from hermes_constants — canonical definition lives there.
-from hermes_constants import get_hermes_home, get_process_hermes_home  # noqa: F811,E402
+from hermes_constants import (  # noqa: F811,E402
+    apply_shared_hermes_mode,
+    get_hermes_home,
+    get_process_hermes_home,
+    is_shared_hermes_home,
+)
 from utils import atomic_replace, fast_safe_load
 
 def get_config_path() -> Path:
@@ -772,15 +777,18 @@ def _secure_dir(path):
     """
     if is_managed():
         return
-    try:
-        mode_str = os.environ.get("HERMES_HOME_MODE", "").strip()
-        mode = int(mode_str, 8) if mode_str else 0o700
-    except ValueError:
-        mode = 0o700
-    try:
-        os.chmod(path, mode)
-    except (OSError, NotImplementedError):
-        pass
+    if is_shared_hermes_home():
+        apply_shared_hermes_mode(path, directory=True)
+    else:
+        try:
+            mode_str = os.environ.get("HERMES_HOME_MODE", "").strip()
+            mode = int(mode_str, 8) if mode_str else 0o700
+        except ValueError:
+            mode = 0o700
+        try:
+            os.chmod(path, mode)
+        except (OSError, NotImplementedError):
+            pass
     _chown_to_hermes_uid(path)
 
 
@@ -818,7 +826,12 @@ def _secure_file(path):
     Skipped in containers — Docker/Podman volume mounts often need broader
     permissions.  Set HERMES_SKIP_CHMOD=1 to force-skip on other systems.
     """
-    if is_managed() or _is_container():
+    if is_managed():
+        return
+    if is_shared_hermes_home():
+        apply_shared_hermes_mode(path)
+        return
+    if _is_container():
         return
     try:
         if os.path.exists(str(path)):
@@ -883,6 +896,13 @@ def ensure_hermes_home():
             f"Named profile home does not exist: {home}. "
             "Create the profile explicitly before using it."
         )
+    if is_shared_hermes_home():
+        # Apply once at the central home-initialization boundary.  Explicit
+        # secure writers still select their own final modes below, but this
+        # makes ordinary agent-created files and directories group-readable
+        # from their first creation.
+        os.umask(0o007)
+
     if is_managed():
         old_umask = os.umask(0o007)
         try:

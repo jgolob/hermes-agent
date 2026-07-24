@@ -49,7 +49,7 @@ from hermes_cli.config import (
     read_raw_config,
     require_readable_config_before_write,
 )
-from hermes_constants import OPENROUTER_BASE_URL, secure_parent_dir
+from hermes_constants import OPENROUTER_BASE_URL, apply_shared_hermes_mode, secure_parent_dir
 from agent.credential_persistence import sanitize_borrowed_credential_payload
 from utils import atomic_replace, atomic_yaml_write, env_float, is_truthy_value
 
@@ -1205,11 +1205,13 @@ def _save_auth_store(auth_store: Dict[str, Any], target_path: Optional[Path] = N
                 tmp_path.unlink()
         except OSError:
             pass
-    # Restrict file permissions to owner only
-    try:
-        auth_file.chmod(stat.S_IRUSR | stat.S_IWUSR)
-    except OSError:
-        pass
+    # Shared homes deliberately make credentials reviewable by the dedicated
+    # Hermes group; ordinary homes retain owner-only credential permissions.
+    if not apply_shared_hermes_mode(auth_file):
+        try:
+            auth_file.chmod(stat.S_IRUSR | stat.S_IWUSR)
+        except OSError:
+            pass
     return auth_file
 
 
@@ -5217,9 +5219,10 @@ def _write_shared_nous_state(state: Dict[str, Any]) -> None:
             # secure_parent_dir refuses to chmod / or top-level dirs (#25821).
             secure_parent_dir(path)
             tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex}")
-            # Create with 0o600 atomically via os.open(O_EXCL) — closes the TOCTOU
-            # window where write_text() + post-write chmod briefly exposed Nous
-            # refresh_token at process umask. See #19673, #21148.
+            # Create with 0o600 atomically via os.open(O_EXCL), closing the
+            # world-readable TOCTOU window from write_text() + post-write chmod.
+            # Shared-home mode deliberately normalizes the final file to 0o660
+            # for the trusted Hermes group. See #19673, #21148.
             fd = os.open(
                 str(tmp),
                 os.O_WRONLY | os.O_CREAT | os.O_EXCL,
@@ -5230,7 +5233,7 @@ def _write_shared_nous_state(state: Dict[str, Any]) -> None:
                     fh.write(json.dumps(shared, indent=2, sort_keys=True))
                     fh.flush()
                     os.fsync(fh.fileno())
-                os.replace(tmp, path)
+                atomic_replace(tmp, path)
             finally:
                 try:
                     if tmp.exists():

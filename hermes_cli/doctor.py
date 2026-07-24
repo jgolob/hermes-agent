@@ -841,10 +841,12 @@ def run_doctor(args):
                 # .env holds API keys — restrict to owner-only access from
                 # creation. touch() obeys umask which is commonly 0o022,
                 # leaving the file world-readable; tighten explicitly.
-                try:
-                    os.chmod(str(env_path), 0o600)
-                except OSError:
-                    pass
+                from hermes_constants import apply_shared_hermes_mode
+                if not apply_shared_hermes_mode(env_path):
+                    try:
+                        os.chmod(str(env_path), 0o600)
+                    except OSError:
+                        pass
                 check_ok(f"Created empty {_DHH}/.env")
                 check_info("Run 'hermes setup' to configure API keys")
                 fixed_count += 1

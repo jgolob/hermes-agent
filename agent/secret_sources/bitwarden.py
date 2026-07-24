@@ -399,7 +399,9 @@ def _write_encrypted_disk_cache(
         cache_dir = path.parent
         cache_dir.mkdir(parents=True, exist_ok=True)
         try:
-            os.chmod(cache_dir, 0o700)
+            from hermes_constants import apply_shared_hermes_mode
+            if not apply_shared_hermes_mode(cache_dir, directory=True):
+                os.chmod(cache_dir, 0o700)
         except OSError:
             pass
         salt = os.urandom(16)
@@ -426,8 +428,11 @@ def _write_encrypted_disk_cache(
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(payload, f)
-            os.chmod(tmp, 0o600)
+            from hermes_constants import apply_shared_hermes_mode
+            if not apply_shared_hermes_mode(tmp):
+                os.chmod(tmp, 0o600)
             os.replace(tmp, path)
+            apply_shared_hermes_mode(path)
             # A successful encrypted write completes migration; remove the
             # legacy plaintext cache so stale secrets cannot remain on disk.
             try:

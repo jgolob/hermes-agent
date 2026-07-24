@@ -33,7 +33,7 @@ except ImportError:  # pragma: no cover - non-Windows
     msvcrt = None
 from datetime import datetime, timedelta
 from pathlib import Path
-from hermes_constants import get_hermes_home
+from hermes_constants import apply_shared_hermes_mode, get_hermes_home
 from typing import Optional, Dict, List, Any, Set, Tuple, Union
 
 logger = logging.getLogger(__name__)
@@ -460,6 +460,8 @@ def _normalize_job_record(job: Dict[str, Any]) -> Dict[str, Any]:
 
 def _secure_dir(path: Path):
     """Set directory to owner-only access (0700). No-op on Windows."""
+    if apply_shared_hermes_mode(path, directory=True):
+        return
     try:
         os.chmod(path, 0o700)
     except (OSError, NotImplementedError):
@@ -468,6 +470,8 @@ def _secure_dir(path: Path):
 
 def _secure_file(path: Path):
     """Set file to owner-only read/write (0600). No-op on Windows."""
+    if apply_shared_hermes_mode(path):
+        return
     try:
         if path.exists():
             os.chmod(path, 0o600)

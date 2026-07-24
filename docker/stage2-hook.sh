@@ -20,6 +20,15 @@ set -eu
 HERMES_HOME="${HERMES_HOME:-/opt/data}"
 INSTALL_DIR="/opt/hermes"
 
+# Shared-home mode is for a dedicated Hermes service account plus a trusted
+# host/container ``hermes`` group.  It deliberately aligns only the group;
+# the host owner UID remains untouched so operators do not need --user or UID
+# remapping to review agent-created state.
+case "${HERMES_SHARED_HOME:-}" in
+    1|true|TRUE|True|yes|YES|Yes|on|ON|On) HERMES_SHARED_HOME_ENABLED=true ;;
+    *) HERMES_SHARED_HOME_ENABLED=false ;;
+esac
+
 # Drop to hermes via s6-setuidgid, but skip it when already non-root.
 as_hermes() { [ "$(id -u)" = 0 ] || { "$@"; return; }; s6-setuidgid hermes "$@"; }
 
@@ -113,6 +122,11 @@ if [ -n "${HERMES_GID:-}" ] && validate_uid_gid "$HERMES_GID" && [ "$HERMES_GID"
     # -o allows non-unique GID (e.g. macOS GID 20 "staff" may already
     # exist as "dialout" in the Debian-based container image).
     groupmod -o -g "$HERMES_GID" hermes 2>/dev/null || true
+fi
+if [ "$HERMES_SHARED_HOME_ENABLED" = true ] && [ -n "${HERMES_GID:-}" ] && \
+        [ "$(id -g hermes)" != "$HERMES_GID" ]; then
+    echo "[stage2] ERROR: requested shared GID $HERMES_GID could not be assigned to hermes" >&2
+    exit 1
 fi
 
 # --- Docker socket group membership (docker-in-docker / DooD) ---
@@ -211,6 +225,59 @@ refuse_symlinked_path() {
     return 1
 }
 
+# Canonical list of state subdirectories the shared-home sweep converts.
+# Deliberately EXCLUDES lazy-packages, home, and workspace: lazy-packages is on
+# the runtime's sys.path, so group-write there is code execution as the hermes
+# account rather than auditability — the same reason the install tree stays
+# owner-only. Mirrors HERMES_SHARED_SUBDIRS in scripts/install.sh.
+HERMES_SHARED_SUBDIRS="cron sessions logs pairing platforms/pairing hooks image_cache audio_cache memories skills profiles"
+
+if [ "$HERMES_SHARED_HOME_ENABLED" = true ]; then
+    umask 0007
+    if path_has_symlink_component "$HERMES_HOME"; then
+        echo "[stage2] ERROR: shared HERMES_HOME must not contain symlink components: $HERMES_HOME" >&2
+        exit 1
+    fi
+    # Read the mode BEFORE we change it: a home that is not already setgid +
+    # group-rwx has never been converted, which is exactly the case where
+    # pre-existing subdirectories are still owner-only and need a sweep. On an
+    # already-converted volume we skip the sweep entirely, because chmod-ing a
+    # large skills/sessions tree on every container start is the kind of cost
+    # the recursive-chmod removal above was meant to avoid.
+    shared_home_prior_mode="$(stat -c %a "$HERMES_HOME" 2>/dev/null || echo '')"
+
+    chgrp hermes "$HERMES_HOME" || {
+        echo "[stage2] ERROR: cannot assign $HERMES_HOME to the hermes group" >&2
+        exit 1
+    }
+    chmod 2770 "$HERMES_HOME" || {
+        echo "[stage2] ERROR: cannot apply shared permissions to $HERMES_HOME" >&2
+        exit 1
+    }
+
+    if [ "$shared_home_prior_mode" != "2770" ]; then
+        echo "[stage2] Converting $HERMES_HOME to shared-home permissions (one-time)"
+        set --
+        # Deliberately NOT named `sub` — the chown loop below owns that name,
+        # and its subdir list is asserted against by
+        # tests/tools/test_dockerfile_immutable_install.py.
+        for shared_sub in $HERMES_SHARED_SUBDIRS; do
+            if [ -d "$HERMES_HOME/$shared_sub" ] && \
+                    ! path_has_symlink_component "$HERMES_HOME/$shared_sub"; then
+                set -- "$@" "$HERMES_HOME/$shared_sub"
+            fi
+        done
+        if [ "$#" -gt 0 ]; then
+            chgrp -R hermes "$@" 2>/dev/null || \
+                echo "[stage2] Warning: recursive chgrp failed (rootless container?) — continuing"
+            find "$@" -type d -exec chmod 2770 {} + 2>/dev/null || true
+            # g+rwX adds execute only where it already applies, so scripts keep
+            # their mode and data files do not become executable.
+            find "$@" -type f -exec chmod g+rwX,o-rwx {} + 2>/dev/null || true
+        fi
+    fi
+fi
+
 chown_hermes_tree() {
     target="$1"
     if refuse_symlinked_path "recursive chown" "$target"; then
@@ -224,7 +291,7 @@ needs_chown=false
 if [ "$(stat -c %u "$HERMES_HOME" 2>/dev/null)" != "$actual_hermes_uid" ]; then
     needs_chown=true
 fi
-if [ "$needs_chown" = true ]; then
+if [ "$needs_chown" = true ] && [ "$HERMES_SHARED_HOME_ENABLED" != true ]; then
     echo "[stage2] Fixing ownership of $HERMES_HOME (targeted) to hermes ($actual_hermes_uid)"
     # In rootless Podman the container's "root" is mapped to an
     # unprivileged host UID — chown will fail. That's fine: the volume
@@ -275,7 +342,7 @@ fi
 # reconciler (02-reconcile-profiles) which runs as hermes and walks
 # the profiles dir. Idempotent; skipped on rootless containers where
 # chown would fail.
-if [ -d "$HERMES_HOME/profiles" ]; then
+if [ "$HERMES_SHARED_HOME_ENABLED" != true ] && [ -d "$HERMES_HOME/profiles" ]; then
     chown_hermes_tree "$HERMES_HOME/profiles"
 fi
 
@@ -283,7 +350,7 @@ fi
 # docker-exec/root-write reason as profiles/. The cron scheduler state
 # (jobs.json) must stay readable by the unprivileged hermes runtime even
 # after root-context maintenance commands or scheduler writes.
-if [ -d "$HERMES_HOME/cron" ]; then
+if [ "$HERMES_SHARED_HOME_ENABLED" != true ] && [ -d "$HERMES_HOME/cron" ]; then
     chown_hermes_tree "$HERMES_HOME/cron"
 fi
 
@@ -296,11 +363,11 @@ fi
 # mis-owned, so warm boots skip it — this block makes a container restart
 # self-heal. Tiny directory (a handful of small JSON files), so the cost
 # is negligible.
-if [ -d "$HERMES_HOME/platforms/pairing" ]; then
+if [ "$HERMES_SHARED_HOME_ENABLED" != true ] && [ -d "$HERMES_HOME/platforms/pairing" ]; then
     chown_hermes_tree "$HERMES_HOME/platforms/pairing"
 fi
 # Legacy location (pre-consolidated layout).
-if [ -d "$HERMES_HOME/pairing" ]; then
+if [ "$HERMES_SHARED_HOME_ENABLED" != true ] && [ -d "$HERMES_HOME/pairing" ]; then
     chown_hermes_tree "$HERMES_HOME/pairing"
 fi
 
@@ -319,6 +386,7 @@ fi
 # (issue #19788, PR #19795). The list mirrors the top-level *file*
 # entries of hermes_cli.profile_distribution.USER_OWNED_EXCLUDE plus the
 # runtime lock files; keep them in sync if that set changes.
+if [ "$HERMES_SHARED_HOME_ENABLED" != true ]; then
 for f in \
     auth.json auth.lock .env \
     state.db state.db-shm state.db-wal \
@@ -334,6 +402,7 @@ for f in \
         fi
     fi
 done
+fi
 
 # --- config.yaml permissions ---
 # Ensure config.yaml is readable by the hermes runtime user even if it
@@ -342,8 +411,13 @@ if [ -f "$HERMES_HOME/config.yaml" ]; then
     if refuse_symlinked_path "chown/chmod" "$HERMES_HOME/config.yaml"; then
         :
     else
-        chown hermes:hermes "$HERMES_HOME/config.yaml" 2>/dev/null || true
-        chmod 640 "$HERMES_HOME/config.yaml" 2>/dev/null || true
+        if [ "$HERMES_SHARED_HOME_ENABLED" = true ]; then
+            chgrp hermes "$HERMES_HOME/config.yaml" 2>/dev/null || true
+            chmod 660 "$HERMES_HOME/config.yaml" 2>/dev/null || true
+        else
+            chown hermes:hermes "$HERMES_HOME/config.yaml" 2>/dev/null || true
+            chmod 640 "$HERMES_HOME/config.yaml" 2>/dev/null || true
+        fi
     fi
 fi
 
@@ -414,8 +488,13 @@ if [ -f "$HERMES_HOME/.env" ]; then
     if refuse_symlinked_path "chown/chmod" "$HERMES_HOME/.env"; then
         :
     else
-        chown hermes:hermes "$HERMES_HOME/.env" 2>/dev/null || true
-        chmod 600 "$HERMES_HOME/.env" 2>/dev/null || true
+        if [ "$HERMES_SHARED_HOME_ENABLED" = true ]; then
+            chgrp hermes "$HERMES_HOME/.env" 2>/dev/null || true
+            chmod 660 "$HERMES_HOME/.env" 2>/dev/null || true
+        else
+            chown hermes:hermes "$HERMES_HOME/.env" 2>/dev/null || true
+            chmod 600 "$HERMES_HOME/.env" 2>/dev/null || true
+        fi
     fi
 fi
 
@@ -438,8 +517,13 @@ if [ ! -f "$HERMES_HOME/auth.json" ] && [ -n "${HERMES_AUTH_JSON_BOOTSTRAP:-}" ]
         :
     else
         printf '%s' "$HERMES_AUTH_JSON_BOOTSTRAP" > "$HERMES_HOME/auth.json"
-        chown hermes:hermes "$HERMES_HOME/auth.json" 2>/dev/null || true
-        chmod 600 "$HERMES_HOME/auth.json"
+        if [ "$HERMES_SHARED_HOME_ENABLED" = true ]; then
+            chgrp hermes "$HERMES_HOME/auth.json" 2>/dev/null || true
+            chmod 660 "$HERMES_HOME/auth.json"
+        else
+            chown hermes:hermes "$HERMES_HOME/auth.json" 2>/dev/null || true
+            chmod 600 "$HERMES_HOME/auth.json"
+        fi
     fi
 fi
 
@@ -500,8 +584,13 @@ if [ ! -f "$HERMES_HOME/gateway_state.json" ] && \
         :
     else
         printf '{"gateway_state":"running"}\n' > "$HERMES_HOME/gateway_state.json"
-        chown hermes:hermes "$HERMES_HOME/gateway_state.json" 2>/dev/null || true
-        chmod 644 "$HERMES_HOME/gateway_state.json"
+        if [ "$HERMES_SHARED_HOME_ENABLED" = true ]; then
+            chgrp hermes "$HERMES_HOME/gateway_state.json" 2>/dev/null || true
+            chmod 660 "$HERMES_HOME/gateway_state.json"
+        else
+            chown hermes:hermes "$HERMES_HOME/gateway_state.json" 2>/dev/null || true
+            chmod 644 "$HERMES_HOME/gateway_state.json"
+        fi
     fi
 fi
 

@@ -36,7 +36,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from hermes_constants import get_hermes_home
+from hermes_constants import apply_shared_hermes_mode, get_hermes_home
 from hermes_time import now as _hermes_now
 from utils import atomic_replace
 
@@ -63,6 +63,8 @@ _STATUS_DISMISSED = "dismissed"
 
 
 def _secure_file(path: Path) -> None:
+    if apply_shared_hermes_mode(path):
+        return
     try:
         os.chmod(path, 0o600)
     except OSError:
