@@ -225,11 +225,9 @@ refuse_symlinked_path() {
     return 1
 }
 
-# Canonical list of state subdirectories the shared-home sweep converts.
-# Deliberately EXCLUDES lazy-packages, home, and workspace: lazy-packages is on
-# the runtime's sys.path, so group-write there is code execution as the hermes
-# account rather than auditability — the same reason the install tree stays
-# owner-only. Mirrors HERMES_SHARED_SUBDIRS in scripts/install.sh.
+# Canonical list of state subdirectories seeded by the installer. Runtime
+# enforcement covers the entire HERMES_HOME, including paths not listed here.
+# Mirrors HERMES_SHARED_SUBDIRS in scripts/install.sh.
 HERMES_SHARED_SUBDIRS="cron sessions logs pairing platforms/pairing hooks image_cache audio_cache memories skills profiles"
 
 if [ "$HERMES_SHARED_HOME_ENABLED" = true ]; then
@@ -238,44 +236,11 @@ if [ "$HERMES_SHARED_HOME_ENABLED" = true ]; then
         echo "[stage2] ERROR: shared HERMES_HOME must not contain symlink components: $HERMES_HOME" >&2
         exit 1
     fi
-    # Read the mode BEFORE we change it: a home that is not already setgid +
-    # group-rwx has never been converted, which is exactly the case where
-    # pre-existing subdirectories are still owner-only and need a sweep. On an
-    # already-converted volume we skip the sweep entirely, because chmod-ing a
-    # large skills/sessions tree on every container start is the kind of cost
-    # the recursive-chmod removal above was meant to avoid.
-    shared_home_prior_mode="$(stat -c %a "$HERMES_HOME" 2>/dev/null || echo '')"
-
-    chgrp hermes "$HERMES_HOME" || {
-        echo "[stage2] ERROR: cannot assign $HERMES_HOME to the hermes group" >&2
-        exit 1
-    }
-    chmod 2770 "$HERMES_HOME" || {
-        echo "[stage2] ERROR: cannot apply shared permissions to $HERMES_HOME" >&2
-        exit 1
-    }
-
-    if [ "$shared_home_prior_mode" != "2770" ]; then
-        echo "[stage2] Converting $HERMES_HOME to shared-home permissions (one-time)"
-        set --
-        # Deliberately NOT named `sub` — the chown loop below owns that name,
-        # and its subdir list is asserted against by
-        # tests/tools/test_dockerfile_immutable_install.py.
-        for shared_sub in $HERMES_SHARED_SUBDIRS; do
-            if [ -d "$HERMES_HOME/$shared_sub" ] && \
-                    ! path_has_symlink_component "$HERMES_HOME/$shared_sub"; then
-                set -- "$@" "$HERMES_HOME/$shared_sub"
-            fi
-        done
-        if [ "$#" -gt 0 ]; then
-            chgrp -R hermes "$@" 2>/dev/null || \
-                echo "[stage2] Warning: recursive chgrp failed (rootless container?) — continuing"
-            find "$@" -type d -exec chmod 2770 {} + 2>/dev/null || true
-            # g+rwX adds execute only where it already applies, so scripts keep
-            # their mode and data files do not become executable.
-            find "$@" -type f -exec chmod g+rwX,o-rwx {} + 2>/dev/null || true
-        fi
-    fi
+    # Repair drift before any unprivileged bootstrap step needs to traverse the
+    # volume. The same helper runs again after bootstrap to normalize files
+    # created by migrations and skill synchronization.
+    "$INSTALL_DIR/.venv/bin/python" "$INSTALL_DIR/scripts/enforce_shared_home.py" \
+        --home "$HERMES_HOME" --gid "$(id -g hermes)" || true
 fi
 
 chown_hermes_tree() {
@@ -603,6 +568,14 @@ fi
 if [ -d "$INSTALL_DIR/skills" ]; then
     as_hermes "$INSTALL_DIR/.venv/bin/python" "$INSTALL_DIR/tools/skills_sync.py" \
         || echo "[stage2] Warning: skills_sync.py failed; continuing"
+fi
+
+# Enforce again at the final bootstrap boundary. This is intentionally a full
+# tree inspection on every start: HERMES_SHARED_HOME is an ongoing contract,
+# not a one-time migration keyed only to the root directory's mode.
+if [ "$HERMES_SHARED_HOME_ENABLED" = true ]; then
+    "$INSTALL_DIR/.venv/bin/python" "$INSTALL_DIR/scripts/enforce_shared_home.py" \
+        --home "$HERMES_HOME" --gid "$(id -g hermes)" || true
 fi
 
 # --- Discover agent-browser's Chromium binary ---

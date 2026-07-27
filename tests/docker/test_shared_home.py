@@ -69,6 +69,37 @@ def test_shared_home_preserves_host_owner_and_makes_agent_skill_reviewable(
         skill_file = host_data / "skills" / "review-test" / "SKILL.md"
         assert _mode(skill_file.parent) == 0o2770
         assert _mode(skill_file) == 0o660
+
+        # Root is already correct, but descendants drift to owner-only. A warm
+        # restart must repair the entire tree, including an unexpected path.
+        drift = docker_exec(
+            container_name,
+            "sh",
+            "-c",
+            "mkdir -p /opt/data/future-state/nested && "
+            "printf state > /opt/data/future-state/nested/state.txt && "
+            "chmod 700 /opt/data/future-state /opt/data/future-state/nested && "
+            "chmod 600 /opt/data/future-state/nested/state.txt",
+            timeout=30,
+        )
+        assert drift.returncode == 0, drift.stderr
+        drifted_file = host_data / "future-state" / "nested" / "state.txt"
+        drifted_uid = drifted_file.stat().st_uid
+
+        subprocess.run(
+            ["docker", "restart", container_name],
+            check=True,
+            capture_output=True,
+            timeout=60,
+        )
+        wait_for_container_ready(container_name)
+
+        assert _mode(host_data) == 0o2770
+        assert _mode(drifted_file.parent.parent) == 0o2770
+        assert _mode(drifted_file.parent) == 0o2770
+        assert _mode(drifted_file) == 0o660
+        assert drifted_file.stat().st_uid == drifted_uid
+        assert drifted_file.stat().st_gid == host_gid
     finally:
         subprocess.run(
             ["docker", "rm", "-f", container_name],

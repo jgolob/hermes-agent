@@ -78,7 +78,7 @@ def _warn_profile_fallback_once() -> None:
     try:
         fallback_home = _get_platform_default_hermes_home()
         active_path = fallback_home / "active_profile"
-        active = active_path.read_text().strip() if active_path.exists() else ""
+        active = active_path.read_text(encoding="utf-8").strip() if active_path.exists() else ""
     except (UnicodeDecodeError, OSError):
         active = ""
     if active and active != "default":
@@ -177,6 +177,97 @@ def shared_hermes_dir_mode() -> int:
 def shared_hermes_file_mode(*, executable: bool = False) -> int:
     """Return the desired regular-file mode for a shared Hermes home."""
     return 0o770 if executable else 0o660
+
+
+def enforce_shared_hermes_home(
+    root: str | Path | None = None,
+    *,
+    gid: int | None = None,
+) -> list[str]:
+    """Repair shared-home group ownership and modes without following symlinks.
+
+    The full tree is inspected on every process/container start.  Only entries
+    whose GID or mode differs are changed, so the steady-state pass performs
+    reads but avoids redundant ``chown``/``chmod`` syscalls.
+
+    Returns human-readable errors instead of raising.  Shared mode improves
+    operator visibility, but a single unrepairable path must not prevent Hermes
+    from starting.
+    """
+    if not is_shared_hermes_home():
+        return []
+
+    home = Path(root) if root is not None else get_default_hermes_root()
+    try:
+        home = home.absolute()
+        root_stat = home.lstat()
+    except OSError as exc:
+        return [f"{home}: inspect failed: {exc}"]
+    if stat.S_ISLNK(root_stat.st_mode):
+        return [f"{home}: refusing to enforce through a symlinked HERMES_HOME"]
+    if not stat.S_ISDIR(root_stat.st_mode):
+        return [f"{home}: HERMES_HOME is not a directory"]
+
+    desired_gid = gid
+    if desired_gid is None:
+        raw_gid = os.environ.get("HERMES_GID", "").strip()
+        if raw_gid:
+            try:
+                desired_gid = int(raw_gid)
+            except ValueError:
+                return [f"HERMES_GID must be numeric, got {raw_gid!r}"]
+        else:
+            # Native deployments establish the trusted group on HERMES_HOME
+            # itself; descendants are repaired to that canonical group.
+            desired_gid = root_stat.st_gid
+
+    errors: list[str] = []
+
+    def normalize(path: Path, path_stat: os.stat_result) -> None:
+        if stat.S_ISLNK(path_stat.st_mode):
+            return
+        if path_stat.st_gid != desired_gid:
+            try:
+                os.chown(path, -1, desired_gid, follow_symlinks=False)
+            except (OSError, NotImplementedError) as exc:
+                errors.append(f"{path}: chgrp to GID {desired_gid} failed: {exc}")
+
+        if stat.S_ISDIR(path_stat.st_mode):
+            desired_mode = shared_hermes_dir_mode()
+        else:
+            desired_mode = shared_hermes_file_mode(
+                executable=bool(path_stat.st_mode & 0o111)
+            )
+        if stat.S_IMODE(path_stat.st_mode) != desired_mode:
+            try:
+                os.chmod(path, desired_mode, follow_symlinks=False)
+            except (OSError, NotImplementedError) as exc:
+                errors.append(f"{path}: chmod {desired_mode:04o} failed: {exc}")
+
+    normalize(home, root_stat)
+
+    def walk(directory: Path) -> None:
+        try:
+            with os.scandir(directory) as entries:
+                children = list(entries)
+        except OSError as exc:
+            errors.append(f"{directory}: scan failed: {exc}")
+            return
+        for entry in children:
+            path = Path(entry.path)
+            try:
+                entry_stat = entry.stat(follow_symlinks=False)
+            except OSError as exc:
+                errors.append(f"{path}: inspect failed: {exc}")
+                continue
+            if stat.S_ISLNK(entry_stat.st_mode):
+                continue
+            normalize(path, entry_stat)
+            if stat.S_ISDIR(entry_stat.st_mode):
+                walk(path)
+
+    walk(home)
+    return errors
 
 
 def apply_shared_hermes_mode(

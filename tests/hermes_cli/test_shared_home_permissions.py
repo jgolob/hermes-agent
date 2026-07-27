@@ -12,6 +12,7 @@ import pytest
 
 from hermes_constants import (
     apply_shared_hermes_mode,
+    enforce_shared_hermes_home,
     is_shared_hermes_home,
     shared_hermes_dir_mode,
 )
@@ -122,6 +123,108 @@ def test_shared_mode_intentionally_makes_credentials_group_reviewable(
     assert _mode(generic_secret) == 0o660
     assert _mode(mcp_token) == 0o660
     assert _mode(mcp_token.parent) == shared_hermes_dir_mode()
+
+
+def test_startup_enforcement_repairs_drift_across_entire_home(
+    shared_home: Path,
+) -> None:
+    unexpected = shared_home / "future-state" / "nested"
+    unexpected.mkdir(parents=True)
+    regular = unexpected / "state.json"
+    regular.write_text("{}\n", encoding="utf-8")
+    executable = shared_home / "workspace" / "run.sh"
+    executable.parent.mkdir()
+    executable.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    # Reproduce the warm-restart bug: the root is already correct, while
+    # descendants have drifted back to owner-only modes.
+    shared_home.chmod(shared_hermes_dir_mode())
+    unexpected.chmod(0o700)
+    regular.chmod(0o600)
+    executable.parent.chmod(0o700)
+    executable.chmod(0o700)
+    original_uid = executable.stat().st_uid
+
+    assert enforce_shared_hermes_home(shared_home) == []
+
+    assert _mode(shared_home) == shared_hermes_dir_mode()
+    assert _mode(unexpected) == shared_hermes_dir_mode()
+    assert _mode(regular) == 0o660
+    assert _mode(executable.parent) == shared_hermes_dir_mode()
+    assert _mode(executable) == 0o770
+    assert executable.stat().st_uid == original_uid
+
+
+def test_startup_enforcement_avoids_redundant_mode_or_group_changes(
+    shared_home: Path,
+) -> None:
+    state = shared_home / "state.json"
+    state.write_text("{}\n", encoding="utf-8")
+    assert enforce_shared_hermes_home(shared_home) == []
+
+    with (
+        patch("hermes_constants.os.chmod") as chmod,
+        patch("hermes_constants.os.chown") as chown,
+    ):
+        assert enforce_shared_hermes_home(shared_home) == []
+
+    chmod.assert_not_called()
+    chown.assert_not_called()
+
+
+def test_startup_enforcement_does_not_follow_symlinks(
+    shared_home: Path, tmp_path: Path,
+) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir(mode=0o700)
+    secret = outside / "secret"
+    secret.write_text("private\n", encoding="utf-8")
+    secret.chmod(0o600)
+    (shared_home / "external").symlink_to(outside, target_is_directory=True)
+
+    assert enforce_shared_hermes_home(shared_home) == []
+
+    assert _mode(outside) == 0o700
+    assert _mode(secret) == 0o600
+
+
+def test_startup_enforcement_reports_failures_and_continues(
+    shared_home: Path,
+) -> None:
+    blocked = shared_home / "blocked.json"
+    blocked.write_text("{}\n", encoding="utf-8")
+    blocked.chmod(0o600)
+    real_chmod = os.chmod
+
+    def fail_blocked(path, mode, *, follow_symlinks=True):
+        if Path(path) == blocked:
+            raise PermissionError("owned by another user")
+        return real_chmod(path, mode, follow_symlinks=follow_symlinks)
+
+    with patch("hermes_constants.os.chmod", side_effect=fail_blocked):
+        errors = enforce_shared_hermes_home(shared_home)
+
+    assert len(errors) == 1
+    assert str(blocked) in errors[0]
+    assert "owned by another user" in errors[0]
+
+
+def test_native_home_initialization_enforces_existing_descendants(
+    shared_home: Path,
+) -> None:
+    from hermes_cli import config
+
+    drifted = shared_home / "workspace" / "review.txt"
+    drifted.parent.mkdir()
+    drifted.write_text("review\n", encoding="utf-8")
+    drifted.parent.chmod(0o700)
+    drifted.chmod(0o600)
+    config._HERMES_HOME_ENSURED.discard(str(shared_home))
+
+    config.ensure_hermes_home()
+
+    assert _mode(drifted.parent) == shared_hermes_dir_mode()
+    assert _mode(drifted) == 0o660
 
 
 def test_agent_created_skill_is_group_reviewable(shared_home: Path) -> None:

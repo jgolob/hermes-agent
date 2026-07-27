@@ -27,6 +27,13 @@ bit keeps new directories in the `hermes` group. On macOS, directory mode is
 instead. This is a deliberate reviewable security model, not a compatibility
 workaround.
 
+`HERMES_SHARED_HOME=1` is an enforcement contract, not a one-time migration.
+At every container or native process start, Hermes inspects the complete
+`HERMES_HOME` tree and repairs group ownership and modes that have drifted.
+This includes profiles, workspaces, lazy-installed packages, and paths added by
+future releases. Correct entries are only inspected; Hermes avoids redundant
+`chmod` and `chgrp` calls.
+
 :::note Native Windows
 
 This mode is a no-op on native Windows. Windows ACLs have no direct equivalent
@@ -143,6 +150,10 @@ The containers can have different UIDs. They cooperate through the matching
 numeric `hermes` GID. Only give `group_add` and the mounted directory to
 services trusted to read and change all Hermes state.
 
+Container bootstrap starts as root, so each restart can repair group ownership
+and permissions even when a bind-mounted file is owned by a host operator. The
+file's UID is preserved; only its group and mode are normalized.
+
 After startup, verify both access and ownership without relying on a matching
 host UID:
 
@@ -212,6 +223,16 @@ sudo systemctl status hermes-gateway
 
 The explicit `UMask` is defense in depth; Hermes also applies `0007` when
 shared-home mode is enabled.
+
+Native enforcement runs as the Hermes process and therefore cannot chmod files
+owned by another user. Keep the tree owned by the `hermes` service account;
+human operators should edit through their `hermes` group membership without
+taking ownership. Hermes reports any paths it cannot repair and continues
+starting, so these warnings should be treated as a failed reviewability check.
+
+Because enforcement inspects the complete state tree once per process start,
+very large homes may add some startup I/O. Already-correct entries are not
+rewritten.
 
 ## When not to use it
 
