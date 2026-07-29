@@ -325,6 +325,16 @@ include = ["agent", "agent.*", "tools", "tools.*", "hermes_cli", "hermes_cli.*",
 # topic-setup image disappears. Loaded via Path(__file__).parent / "assets"
 # in gateway/status_phrases.py and gateway/run.py.
 gateway = ["assets/**/*"]
+# Every bundled plugin is identified by its plugin.yaml manifest —
+# PluginManager._scan_directory ignores any directory without one. The
+# manifests are not .py files, so packages.find ships the plugin modules but
+# setuptools drops all 93 manifests from the wheel unless they are declared
+# here. An install-from-wheel then discovers ZERO plugins: no web search
+# providers, no platform adapters, no memory backends. Running from a source
+# checkout hides this completely (the manifests are simply there on disk),
+# which is why it only surfaced in the hermes-webui container, which pip
+# installs the agent rather than running it in place.
+"*" = ["plugin.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
